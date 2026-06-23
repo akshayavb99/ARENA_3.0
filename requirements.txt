@@ -61,16 +61,16 @@ imageio-ffmpeg
 mediapy
 
 # Chapter 1 (interp)
-transformer_lens>=2.16.1,<3.0.0
+transformer_lens #>=2.16.1,<3.0.0
 transformers>=4.51,<5
 sae-lens>=6.37.4,<7.0.0
 sae-vis==0.3.7
-git+https://github.com/callummcdougall/CircuitsVis.git#subdirectory=python
+circuitsvis
 git+https://github.com/neelnanda-io/neel-plotly
 
 # Chapter 2 (RL)
 pygame
-gymnasium[atari, accept-rom-license, other, mujoco-py]==0.29.0
+gymnasium[atari, accept-rom-license, other, mujoco-py] #==0.29.0
 mujoco
 # Rendering MuJoCo videos additionally needs a system OpenGL backend, which pip cannot provide:
 # `sudo apt-get install libosmesa6`, or without sudo `conda create -n oslibs -c conda-forge
@@ -80,10 +80,10 @@ mujoco
 # GPU physics for the MuJoCo section (Brax `positional` backend + our torch PPO). Pinned because
 # brax only declares `jax>=0.4.6` (no upper bound), so an unpinned install grabs a newer jax whose
 # removed `device_put_replicated` breaks brax. jax 0.10.1 is the verified-working combo.
-jax[cuda12]==0.10.1
-brax==0.14.2
+jax[cuda12] #==0.10.1
+brax #==0.14.2
 # Vectorised Atari emulators (C++) for the Atari bonus section's AtariEnvs.
-envpool==1.2.5
+envpool #==1.2.5
 
 # Chapter 3 (evals)
 inspect_ai
