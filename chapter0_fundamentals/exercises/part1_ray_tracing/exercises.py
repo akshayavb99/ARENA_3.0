@@ -161,4 +161,79 @@ def intersect_ray_1d(ray: Float[Tensor, "points dims"], segment: Float[Tensor, "
 tests.test_intersect_ray_1d(intersect_ray_1d)
 tests.test_intersect_ray_1d_special_case(intersect_ray_1d)
 
+# %% [markdown]
+### `intersect_rays_1d` - Batched operations
+
+# %%
+def intersect_rays_1d(
+    rays: Float[Tensor, "nrays 2 3"], segments: Float[Tensor, "nsegments 2 3"]
+) -> Bool[Tensor, " nrays"]:
+    """
+    For each ray, return True if it intersects any segment.
+    """
+    # Using einops to repeat rays and segments to create a grid of all possible intersection combinations
+    rays_expanded = einops.repeat(rays, "nr p c -> nr ns p c", ns = segments.shape[0])
+    segments_expanded = einops.repeat(segments, "ns p c -> nr ns p c", nr = rays.shape[0])
+    
+    # Getting the origin and direction points from the rays and the endpoints from the segments
+    O = rays_expanded[:, :, 0, :2]  # shape (nrays, nsegments, 2)
+    D = rays_expanded[:, :, 1, :2]  # shape (nrays, nsegments, 2)
+    L_1 = segments_expanded[:, :, 0, :2]  # shape (nrays, nsegments, 2)
+    L_2 = segments_expanded[:, :, 1, :2]  # shape (nrays, nsegments, 2)
+    
+    # Construct matrix for each ray and segment pair
+    A = t.stack([D, -(L_2 - L_1)], dim=-1)  # shape (nrays, nsegments, 2, 2)
+    
+    # Construct the RHS vector for the linear system of equations
+    b = L_1 - O  # shape (nrays, nsegments, 2)
+    
+    # Find determinants for each ray-segment pair to check for singularity
+    det_A = t.linalg.det(A)  # shape (nrays, nsegments)
+    is_singular = det_A.abs() < 1e-8  # shape (nrays, nsegments)
+    
+    # Unsqueeze is_singular from (nr, ns) -> (nr, ns, 1, 1) to broadcast with (nr, ns, 2, 2)
+    # t.eye(2) will automatically broadcast its trailing (2, 2) dimensions
+    A_safe = t.where(is_singular.unsqueeze(-1).unsqueeze(-1), t.eye(2), A)
+
+    # Solve the linear system 
+    # Note: matrix (nr, ns, 2, 2) and vector b (nr, ns, 2) matches natively, no squeeze needed!
+    x = t.linalg.solve(A_safe, b)
+    u, v = x[..., 0], x[..., 1]  # shape (nrays, nsegments)
+    
+    # Apply logic conditions to determine if rays intersect segments in front of the camera and within the segment bounds
+    intersects = (u >= 0) & (v >= 0) & (v <= 1) & (~is_singular)  # shape (nrays, nsegments)
+    
+    return intersects.any(dim=1)  # shape (nrays,)
+    
+tests.test_intersect_rays_1d(intersect_rays_1d)
+tests.test_intersect_rays_1d_special_case(intersect_rays_1d)
+
+# %% [markdown]
+### Implement `make_rays_2d`
+
+# %%
+def make_rays_2d(num_pixels_y: int, num_pixels_z: int, y_limit: float, z_limit: float) -> Float[Tensor, "nrays 2 3"]:
+    """
+    num_pixels_y: The number of pixels in the y dimension
+    num_pixels_z: The number of pixels in the z dimension
+
+    y_limit: At x=1, the rays should extend from -y_limit to +y_limit, inclusive of both.
+    z_limit: At x=1, the rays should extend from -z_limit to +z_limit, inclusive of both.
+
+    Returns: shape (num_rays=num_pixels_y * num_pixels_z, num_points=2, num_dims=3).
+    """
+    
+    result = t.zeros(num_pixels_y * num_pixels_z, 2, 3)  # Initialize the result tensor
+    y_values = t.linspace(-y_limit, y_limit, num_pixels_y)  # Create evenly spaced y values from -y_limit to y_limit
+    z_values = t.linspace(-z_limit, z_limit, num_pixels_z)  # Create evenly spaced z values from -z_limit to z_limit
+    y_grid, z_grid = t.meshgrid(y_values, z_values, indexing='ij')  # Create a grid of y and z values
+    result[:, 1, 0] = 1.0  # Set the x-coordinate of the direction point to 1.0 for all rays
+    result[:, 1, 1] = y_grid.flatten()  # Set the y-coordinate of the direction point to the flattened y grid
+    result[:, 1, 2] = z_grid.flatten()  # Set the z-coordinate of the direction point to the flattened z grid
+    return result
+
+
+rays_2d = make_rays_2d(10, 10, 0.3, 0.3)
+render_lines_with_plotly(rays_2d)
+
 # %%
