@@ -121,6 +121,7 @@ def update(v=0.0, seed=0):
 # 3. Render the output display window beneath the sliders
 display(out)
 # %% [markdown]
+## Batched Operations
 ### `intersect_ray_1d`
 # %%
 def intersect_ray_1d(ray: Float[Tensor, "points dims"], segment: Float[Tensor, "points dims"]) -> bool:
@@ -236,4 +237,165 @@ def make_rays_2d(num_pixels_y: int, num_pixels_z: int, y_limit: float, z_limit: 
 rays_2d = make_rays_2d(10, 10, 0.3, 0.3)
 render_lines_with_plotly(rays_2d)
 
+# %% [markdown]
+## Triangles
+### Exercise - implement `triangle_ray_intersects`
+
+# %%
+Point = Float[Tensor, "points=3"]
+
+
+def triangle_ray_intersects(A: Point, B: Point, C: Point, O: Point, D: Point) -> bool:
+    """
+    A: shape (3,), one vertex of the triangle
+    B: shape (3,), second vertex of the triangle
+    C: shape (3,), third vertex of the triangle
+    O: shape (3,), origin point
+    D: shape (3,), direction point
+
+    Return True if the ray and the triangle intersect.
+    """
+    
+    """
+    To find if the triangle and ray intersect, we use 2 steps:
+    1. Find the intersection point of the ray with the plane defined by the triangle by solving linear system of equations P(u, v) = P(s)
+    2. Ensure u and v hold values such that the intersection point lies within the triangle (u >= 0, v >= 0, u + v <= 1) and s >= 0 for the ray to intersect in front of the camera.
+    System of equations: A + u(B - A) + v(C - A) = O + s(D - O)
+    Rearranging gives: u(B - A) + v(C - A) - s(D - O) = O - A
+    This can be expressed in matrix form as Ax = b, where:
+        x = [u, v, s]^T
+        M = [[B - A, C - A, -(D - O)]]
+        b = O - A
+    M and b can be split to have 3 rows each corresponding to the x, y, and z coordinates of the points.
+    """
+    
+    M = t.stack([-D, B-A, C-A], dim=1)  # shape (3, 3)
+    b = O - A  # shape (3,)
+    try:
+        x = t.linalg.solve(M, b)  # shape (3,)
+        s, u, v = x
+        if s >= 0 and u >= 0 and v >= 0 and (u + v) <= 1:
+            return True
+        else:
+            return False
+    except t.linalg.LinAlgError:
+        return False      
+    
+tests.test_triangle_ray_intersects(triangle_ray_intersects)
+# %% [markdown]
+### Exercise - implement `raytrace_traingle`
+
+# %%
+def raytrace_triangle(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangle: Float[Tensor, "trianglePoints=3 dims=3"],
+) -> Bool[Tensor, " nrays"]:
+    """
+    For each ray, return True if the triangle intersects that ray.
+    """
+    
+    """
+    The system of equations needs to be expanded to accomodate nrays instead of 1 ray. 
+    This means adding an extra dimension to the traingle points to repeat it across nrays
+    """
+    triangle_expanded = einops.repeat(triangle, "points dims -> nrays points dims", nrays = rays.shape[0])
+    O, D = rays[:, 0, :], rays[:, 1, :]  # shape (nrays, 3)
+    A, B, C = triangle_expanded[:, 0, :], triangle_expanded[:, 1, :], triangle_expanded[:, 2, :]  # shape (nrays, 3)
+    M = t.stack([-D, B-A, C-A], dim=-1)  # shape (nrays, 3, 3)
+    b = O - A  # shape (nrays, 3)
+    try:
+        s,u,v = t.linalg.solve(M, b).T
+        intersects = (s >= 0) & (u >= 0) & (v >= 0) & ((u + v) <= 1)
+        return intersects
+    except t.linalg.LinAlgError:
+        return t.zeros(rays.shape[0], dtype=t.bool)
+
+A = t.tensor([1, 0.0, -0.5])
+B = t.tensor([1, -0.5, 0.0])
+C = t.tensor([1, 0.5, 0.5])
+num_pixels_y = num_pixels_z = 15
+y_limit = z_limit = 0.5
+
+# Plot triangle & rays
+test_triangle = t.stack([A, B, C], dim=0)
+rays2d = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+triangle_lines = t.stack([A, B, C, A, B, C], dim=0).reshape(-1, 2, 3)
+render_lines_with_plotly(rays2d, triangle_lines)
+
+# Calculate and display intersections
+intersects = raytrace_triangle(rays2d, test_triangle)
+img = intersects.reshape(num_pixels_y, num_pixels_z).int()
+imshow(img, origin="lower", width=600, title="Triangle (as intersected by rays)")
+# %% [markdown]
+### Mesh Loading and Rendering
+triangles = t.load(section_dir / "pikachu.pt", weights_only=True)
+
+# %% [markdown]
+### Exercise - implement `raytrace_mesh`
+
+# %%
+def raytrace_mesh(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangles: Float[Tensor, "ntriangles trianglePoints=3 dims=3"],
+) -> Float[Tensor, " nrays"]:
+    """
+    For each ray, return the distance to the closest intersecting triangle, or infinity.
+    """
+    """
+    The system of equations needs to be expanded to accomodate nrays and ntriangles instead of 1 ray and 1 triangle. 
+    This means adding an extra dimension to the traingle points to repeat it across nrays
+    """
+    triangles_expanded = einops.repeat(triangles, "ntriangles trianglePoints dims -> nrays ntriangles trianglePoints dims", nrays = rays.shape[0])
+    assert triangles_expanded.shape == (rays.shape[0], triangles.shape[0], 3, 3)
+    
+    rays_expanded = einops.repeat(rays, "nrays rayPoints dims -> nrays ntriangles rayPoints dims", ntriangles = triangles.shape[0])
+    assert rays_expanded.shape == (rays.shape[0], triangles.shape[0], 2, 3)
+    
+    O, D = rays_expanded[:, :, 0, :], rays_expanded[:, :, 1, :]  # shape (nrays, ntriangles, 3)
+    assert O.shape == (rays.shape[0], triangles.shape[0], 3)
+    assert D.shape == (rays.shape[0], triangles.shape[0], 3)
+                       
+    A, B, C = triangles_expanded[:, :, 0, :], triangles_expanded[:, :, 1, :], triangles_expanded[:, :, 2, :]  # shape (nrays, ntriangles, 3)
+    assert A.shape == (rays.shape[0], triangles.shape[0], 3)
+    assert B.shape == (rays.shape[0], triangles.shape[0], 3)
+    assert C.shape == (rays.shape[0], triangles.shape[0], 3)
+    
+    M = t.stack([-D, B-A, C-A], dim=-1)  # shape (nrays, ntriangles, 3, 3)
+    assert M.shape == (rays.shape[0], triangles.shape[0], 3, 3)
+    
+    b = O - A  # shape (nrays, ntriangles, 3)
+    assert b.shape == (rays.shape[0], triangles.shape[0], 3)
+    
+    # Handle singular matrices without crashing the entire batch
+    dets = t.linalg.det(M)                      # (nrays, ntriangles)
+    is_singular = t.abs(dets) <= 1e-8          # (nrays, ntriangles)
+    M[is_singular] = t.eye(3)  # Replace singular matrices with identity
+
+    try:
+        x = t.linalg.solve(M, b)  # shape (nrays, ntriangles, 3)
+        s,u,v = x[..., 0], x[..., 1], x[..., 2]
+        s *= D[..., 0]
+        intersects = (u >= 0) & (v >= 0) & ((u + v) <= 1) & (~is_singular)
+        s[~intersects] = float("inf")
+        return einops.reduce(s, "NR NT -> NR", "min")
+    except t.linalg.LinAlgError:
+        return t.full((rays.shape[0],), float("inf"))
+
+
+num_pixels_y = 120
+num_pixels_z = 120
+y_limit = z_limit = 1
+
+rays = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+rays[:, 0] = t.tensor([-2, 0.0, 0.0])
+dists = raytrace_mesh(rays, triangles)
+intersects = t.isfinite(dists).view(num_pixels_y, num_pixels_z)
+dists_square = dists.view(num_pixels_y, num_pixels_z)
+img = t.stack([intersects, dists_square], dim=0)
+
+fig = px.imshow(img, facet_col=0, origin="lower", color_continuous_scale="magma", width=1000)
+fig.update_layout(coloraxis_showscale=False)
+for i, text in enumerate(["Intersects", "Distance"]):
+    fig.layout.annotations[i]["text"] = text
+fig.show()
 # %%
