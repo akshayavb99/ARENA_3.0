@@ -74,7 +74,7 @@ fig: go.FigureWidget = setup_widget_fig_ray()
 display(fig)
 
 # %%
-@interact(v=(0.0, 6.0, 0.01), seed=(0, 10, 1))
+""" @interact(v=(0.0, 6.0, 0.01), seed=(0, 10, 1))
 def update(v=0.0, seed=0):
     t.manual_seed(seed)
     L_1, L_2 = t.rand(2, 2)
@@ -83,7 +83,7 @@ def update(v=0.0, seed=0):
     with fig.batch_update():
         fig.update_traces({"x": x, "y": y}, 0)
         fig.update_traces({"x": [L_1[0], L_2[0]], "y": [L_1[1], L_2[1]]}, 1)
-        fig.update_traces({"x": [P(v)[0]], "y": [P(v)[1]]}, 2)
+        fig.update_traces({"x": [P(v)[0]], "y": [P(v)[1]]}, 2) """
 # %%
 # %%
 import ipywidgets as widgets
@@ -377,7 +377,7 @@ def raytrace_mesh(
         s *= D[..., 0]
         intersects = (u >= 0) & (v >= 0) & ((u + v) <= 1) & (~is_singular)
         s[~intersects] = float("inf")
-        return einops.reduce(s, "NR NT -> NR", "min")
+        return einops.reduce(s, "nrays ntriangles -> nrays", "min")
     except t.linalg.LinAlgError:
         return t.full((rays.shape[0],), float("inf"))
 
@@ -398,4 +398,212 @@ fig.update_layout(coloraxis_showscale=False)
 for i, text in enumerate(["Intersects", "Distance"]):
     fig.layout.annotations[i]["text"] = text
 fig.show()
+# %% [markdown]
+## Exercise - rotation matrix
+
+# %%
+def rotation_matrix(theta: Float[Tensor, ""]) -> Float[Tensor, "rows cols"]:
+    """
+    Creates a rotation matrix representing a counterclockwise rotation of `theta` around the y-axis.
+    """
+    rot_mat = t.tensor([[t.cos(theta), 0, t.sin(theta)],
+                        [0, 1, 0],
+                        [-t.sin(theta), 0, t.cos(theta)]])
+    return rot_mat
+
+
+tests.test_rotation_matrix(rotation_matrix)
+
+# %%
+def raytrace_mesh_video(
+    rays: Float[Tensor, "nrays points dim"],
+    triangles: Float[Tensor, "ntriangles points dims"],
+    rotation_matrix: Callable[[float], Float[Tensor, "rows cols"]],
+    raytrace_function: Callable,
+    num_frames: int,
+) -> Bool[Tensor, "nframes nrays"]:
+    """
+    Creates a stack of raytracing results, rotating the triangles by `rotation_matrix` each frame.
+    """
+    result = []
+    theta = t.tensor(2 * t.pi) / num_frames
+    R = rotation_matrix(theta)
+    for theta in tqdm(range(num_frames)):
+        triangles = triangles @ R
+        result.append(raytrace_function(rays, triangles))
+        t.cuda.empty_cache()  # clears GPU memory (this line will be more important later on!)
+    return t.stack(result, dim=0)
+
+
+def display_video(distances: Float[Tensor, "frames y z"]):
+    """
+    Displays video of raytracing results, using Plotly. `distances` is a tensor where the [i, y, z]
+    element is distance to the closest triangle for the i-th frame & the [y, z]-th ray in our 2D
+    grid of rays.
+    """
+    px.imshow(
+        distances,
+        animation_frame=0,
+        origin="lower",
+        zmin=0.0,
+        zmax=distances[distances.isfinite()].quantile(0.99).item(),
+        color_continuous_scale="viridis_r",  # "Brwnyl"
+    ).update_layout(coloraxis_showscale=False, width=550, height=600, title="Raytrace mesh video").show()
+
+
+num_pixels_y = 250
+num_pixels_z = 250
+y_limit = z_limit = 0.8
+num_frames = 50
+
+rays = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+rays[:, 0] = t.tensor([-3.0, 0.0, 0.0])
+dists = raytrace_mesh_video(rays, triangles, rotation_matrix, raytrace_mesh, num_frames)
+dists = einops.rearrange(dists, "frames (y z) -> frames y z", y=num_pixels_y)
+
+display_video(dists)
+# %% [markdown]
+## Exercise - use GPUs
+
+# %%
+def raytrace_mesh_gpu(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangles: Float[Tensor, "ntriangles trianglePoints=3 dims=3"],
+) -> Float[Tensor, " nrays"]:
+    """
+    For each ray, return the distance to the closest intersecting triangle, or infinity.
+
+    All computations should be performed on the GPU.
+    """
+    device = t.device("cuda" if t.cuda.is_available() else "cpu")
+    rays = rays.to(device)
+    triangles = triangles.to(device)
+    dists = raytrace_mesh(rays, triangles)
+    return dists.cpu()
+
+dists = raytrace_mesh_video(rays, triangles, rotation_matrix, raytrace_mesh_gpu, num_frames)
+dists = einops.rearrange(dists, "frames (y z) -> frames y z", y=num_pixels_y)
+display_video(dists)
+
+# %% [markdown]
+## Exercise (bonus) - add lighting
+
+# %%
+def raytrace_mesh_lambert(
+    rays: Float[Tensor, "nrays points=2 dims=3"],
+    triangles: Float[Tensor, "ntriangles points=3 dims=3"],
+    light: Float[Tensor, "dims=3"],
+    ambient_intensity: float,
+    device: str = "cuda",
+) -> Float[Tensor, " nrays"]:
+    """
+    For each ray, return the intensity of light hitting the triangle it intersects with (or zero if
+    no intersection).
+
+    Args:
+        rays:   A tensor of rays, with shape `[nrays, 2, 3]`.
+        triangles:  A tensor of triangles, with shape `[ntriangles, 3, 3]`.
+        light:  A tensor representing the light vector, with shape `[3]`. We compute the intensity
+                as the dot product of the triangle normals & the light vector, then set it to be
+                zero if the sign is negative.
+        ambient_intensity:  A float representing the ambient intensity. This is the minimum
+                            brightness for a triangle, to differentiate it from the black background
+                            (rays that don't hit any triangle).
+        device: The device to perform the computation on.
+
+    Returns:
+        A tensor of intensities for each of the rays, flattened over the [y, z] dimensions. The
+        values are zero when there is no intersection, and `ambient_intensity + intensity` when
+        there is an interesection (where `intensity` is the dot product of the triangle's normal
+        vector and the light vector, truncated at zero).
+    """
+    
+    # Find the closest intersecting triangle for each ray
+    rays = rays.to(device)
+    triangles = triangles.to(device)
+    light = light.to(device)
+    closest_distances = raytrace_mesh(rays, triangles)
+    
+    # 1. Get the actual minimum distances using your raytrace_mesh
+    # shape: [nrays]
+    closest_distances = raytrace_mesh(rays, triangles)
+    
+    # 2. Re-evaluate distances per triangle to find WHICH triangle matches 'closest_distances'
+    # We rebuild the broadcasted arrays exactly like inside your raytrace_mesh
+    NR = rays.size(0)
+    NT = triangles.size(0)
+    
+    triangles_expanded = einops.repeat(triangles, "NT pts dims -> NR NT pts dims", NR=NR)
+    A, B, C = triangles_expanded[:, :, 0, :], triangles_expanded[:, :, 1, :], triangles_expanded[:, :, 2, :]
+    
+    rays_expanded = einops.repeat(rays, "NR pts dims -> NR NT pts dims", NT=NT)
+    O, D = rays_expanded[:, :, 0, :], rays_expanded[:, :, 1, :]
+    
+    # Set up matrix equation
+    M = t.stack([-D, B - A, C - A], dim=-1)
+    b_vec = O - A
+    
+    # Guard against singular matrices
+    dets = t.linalg.det(M)
+    is_singular = dets.abs() < 1e-8
+    M[is_singular] = t.eye(3).to(device)
+    
+    # Solve system for ALL ray-triangle pairs
+    sol = t.linalg.solve(M, b_vec)
+    s = sol[..., 0]   # shape: [nrays, ntriangles]
+    s *= D[..., 0]   # distance scaling matching your implementation
+    
+    # 3. Match the ray's min distance back to the matching triangle index
+    # We look for where s matches closest_distances (expanded to [nrays, 1])
+    # argmax picks out the first True index per ray where the distance matches perfectly
+    is_closest_triangle = (s == closest_distances.unsqueeze(-1))
+    closest_triangle_indices = is_closest_triangle.to(t.long).argmax(dim=-1) # shape: [nrays]
+    
+    # 4. Compute normal vectors for ALL triangles safely
+    edge1 = triangles[:, 1] - triangles[:, 0]
+    edge2 = triangles[:, 2] - triangles[:, 0]
+    normals = t.cross(edge1, edge2, dim=1) # Specify dim=1 so it doesn't crash
+    normals = normals / t.norm(normals, dim=1, keepdim=True)
+    
+    # 5. Normalize light vector & calculate Lambertian intensities
+    light_normalized = light / t.norm(light)
+    intensity_per_triangle = t.einsum("nd, d -> n", normals, light_normalized)
+    intensity_per_triangle = t.where(intensity_per_triangle > 0, intensity_per_triangle, 0.0)
+    
+    # 6. Map intensities to the matching rays using our recovered indices
+    intensity_per_ray = intensity_per_triangle[closest_triangle_indices]
+    
+    # 7. Final shading calculation
+    final_intensity = intensity_per_ray + ambient_intensity
+    final_intensity = t.where(closest_distances.isfinite(), final_intensity, 0.0)
+    
+    return final_intensity.cpu()
+
+def display_video_with_lighting(intensity: Float[Tensor, "frames y z"]):
+    """
+    Displays video of raytracing results, using Plotly. `distances` is a tensor where the [i, y, z]
+    element is the lighting intensity based on the angle of light & the surface of the triangle
+    which this ray hits first.
+    """
+    px.imshow(
+        intensity,
+        animation_frame=0,
+        origin="lower",
+        color_continuous_scale="magma",
+    ).update_layout(coloraxis_showscale=False, width=550, height=600, title="Raytrace mesh video (lighting)").show()
+
+
+ambient_intensity = 0.5
+light = t.tensor([0.0, -1.0, 1.0])
+raytrace_function = partial(
+    raytrace_mesh_lambert,
+    ambient_intensity=ambient_intensity,
+    light=light,
+    device = "cuda" if t.cuda.is_available() else "cpu"
+)
+
+intensity = raytrace_mesh_video(rays, triangles, rotation_matrix, raytrace_function, num_frames)
+intensity = einops.rearrange(intensity, "frames (y z) -> frames y z", y=num_pixels_y)
+display_video_with_lighting(intensity)
+
 # %%
