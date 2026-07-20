@@ -337,3 +337,42 @@ def train(args: SimpleMLPTrainingArgs) -> tuple[list[float], SimpleMLP]:
     return loss_list, accuracy_list, model
 
 
+
+# %% [markdown]
+### Exercise - implement `conv2d`
+
+# %%
+class Conv2d(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int = 0,
+    ):
+        """
+        Same as torch.nn.Conv2d with bias=False.
+
+        Name your weight field `self.weight` for compatibility with the PyTorch version.
+
+        We assume kernel is square, with height = width = `kernel_size`.
+        """
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+
+        N_in = self.in_channels * self.kernel_size * self.kernel_size
+        sf = 1 / np.sqrt(N_in)
+        self.weight = nn.Parameter(sf * (2 * t.rand(out_channels, in_channels, kernel_size, kernel_size) - 1))
+
+    def forward(self, x: t.Tensor) -> t.Tensor:
+        """Apply the functional conv2d, which you can import."""
+        return t.nn.functional.conv2d(x, self.weight, stride=self.stride, padding=self.padding)
+
+    def extra_repr(self) -> str:
+        keys = ["in_channels", "out_channels", "kernel_size", "stride", "padding"]
+        return ", ".join([f"{key}={getattr(self, key)}" for key in keys])
